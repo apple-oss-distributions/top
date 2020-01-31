@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009 Apple Computer, Inc.  All rights reserved.
+ * Copyright (c) 2008, 2009, 2019 Apple Computer, Inc.  All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -26,6 +26,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <curses.h>
+#include <mach/clock_types.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/select.h>
@@ -57,97 +58,95 @@ enum {
 static void event_loop(void *tinst) {
     sigset_t sset, oldsset;
     int samples;
-    struct timeval before, now, tlimit;
- 
+    struct timeval tlimit;
+
     if(sigemptyset(&sset)) {
-	perror("sigemptyset");
-	exit(EXIT_FAILURE);
+        perror("sigemptyset");
+        exit(EXIT_FAILURE);
     }
     
     if(sigaddset(&sset, SIGWINCH)) {
-	perror("sigaddset");
-	exit(EXIT_FAILURE);
+        perror("sigaddset");
+        exit(EXIT_FAILURE);
     }
 
-    if(-1 == gettimeofday(&before, NULL))
-	perror("gettimeofday");
+    uint64_t beforens = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
 
     while(1) {
-	bool sleep_expired = false;
-	fd_set fset;
-	int ready;
+        bool sleep_expired = false;
+        fd_set fset;
+        int ready;
 
-	FD_ZERO(&fset);
-	FD_SET(STDIN_FILENO, &fset);
-	
-	tlimit.tv_sec = top_prefs_get_sleep();
-	tlimit.tv_usec = 0;
+        FD_ZERO(&fset);
+        FD_SET(STDIN_FILENO, &fset);
 
-	ready = select(STDIN_FILENO + 1, &fset, NULL, NULL, &tlimit);
+        tlimit.tv_sec = top_prefs_get_sleep();
+        tlimit.tv_usec = 0;
 
-	if(-1 == gettimeofday(&now, NULL))
-	    perror("gettimeofday");
+        ready = select(STDIN_FILENO + 1, &fset, NULL, NULL, &tlimit);
 
-	if(now.tv_sec >= (before.tv_sec + tlimit.tv_sec)) {
-	    /*
-	     * The sleep has expired, so we should insert new
-	     * data for all stats.  This is different than just
-	     * the case where we handle user input and the rest
-	     * of the data is awaiting a sleep interval update.
-	     */
-	    sleep_expired = true;
-	    before = now;
-	}
+        uint64_t nowns = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
 
-	if(sleep_expired) {
-	    samples = top_prefs_get_samples();
-	    
-	    if(samples > -1) {
-		/* Samples was set in the preferences. */
-		if(0 == samples) {
-		    /* We had N samples and now it's time to exit. */
-		    endwin();
-		    exit(EXIT_SUCCESS);
-		}
-	  
-		top_prefs_set_samples(samples - 1);
-	    }
-	}
+        if (nowns >= beforens + (uint64_t)tlimit.tv_sec * NSEC_PER_SEC) {
+            /*
+             * The sleep has expired, so we should insert new
+             * data for all stats.  This is different than just
+             * the case where we handle user input and the rest
+             * of the data is awaiting a sleep interval update.
+             */
+            sleep_expired = true;
+            beforens = nowns;
+        }
 
-	if(top_signal_is_exit_set()) {
-	    exit(EXIT_SUCCESS);
-	}
-	
-	if(ready && FD_ISSET(STDIN_FILENO, &fset))
-	    (void)user_input_process(tinst);
-	
-	if(sleep_expired)
-	    top_insert(tinst);
-	
-	/* Block SIGWINCH signals while we are in a relayout. */
-	if(-1 == sigprocmask(SIG_BLOCK, &sset, &oldsset)) {
-	    perror("sigprocmask");
-	    exit(EXIT_FAILURE);
-	}
-	
-	if(top_need_relayout() 
-	   || resized || LINES != cached_lines || COLS != cached_columns) {
-	    cached_lines = LINES;
-	    cached_columns = COLS;
-	    
-	    if(top_layout(tinst)) {
-		resized = 1;
-	    } else { 
-		resized = 0;
-	    }	
-	}
-	
-	if(-1 == sigprocmask(SIG_SETMASK, &oldsset, NULL)) {
-	    perror("sigprocmask");
-		exit(EXIT_FAILURE);
-	}
-	
-	top_draw(tinst);
+        if(sleep_expired) {
+            samples = top_prefs_get_samples();
+
+            if(samples > -1) {
+                /* Samples was set in the preferences. */
+                if(0 == samples) {
+                    /* We had N samples and now it's time to exit. */
+                    endwin();
+                    exit(EXIT_SUCCESS);
+                }
+
+                top_prefs_set_samples(samples - 1);
+            }
+        }
+
+        if(top_signal_is_exit_set()) {
+            exit(EXIT_SUCCESS);
+        }
+
+        if(ready && FD_ISSET(STDIN_FILENO, &fset))
+            (void)user_input_process(tinst);
+
+        if(sleep_expired)
+            top_insert(tinst);
+
+        /* Block SIGWINCH signals while we are in a relayout. */
+        if(-1 == sigprocmask(SIG_BLOCK, &sset, &oldsset)) {
+            perror("sigprocmask");
+            exit(EXIT_FAILURE);
+        }
+
+        if(top_need_relayout()
+           || resized || LINES != cached_lines || COLS != cached_columns) {
+            cached_lines = LINES;
+            cached_columns = COLS;
+
+            if(top_layout(tinst)) {
+                resized = 1;
+            } else {
+                resized = 0;
+            }
+        }
+
+        if(-1 == sigprocmask(SIG_SETMASK, &oldsset, NULL)) {
+            perror("sigprocmask");
+            exit(EXIT_FAILURE);
+        }
+
+        top_draw(tinst);
     }
 }
 
@@ -182,46 +181,46 @@ int main(int argc, char *argv[]) {
     top_prefs_init();
     top_options_init();
 
-    if(top_options_parse(argc, argv)) {
-	top_options_usage(stderr, argv[0]);
-	return EXIT_FAILURE;
+    if (top_options_parse(argc, argv)) {
+        top_options_usage(stderr, argv[0]);
+        return EXIT_FAILURE;
     }
 
     /* 18007048: If output isn't a tty and -l isn't specified, imply -l 0. */
-    if (!isatty(STDOUT_FILENO) && top_prefs_get_samples() < 0) {
-	top_prefs_set_samples(0);
+    if ((!isatty(STDOUT_FILENO)) && (top_prefs_get_samples() < 0)) {
+        top_prefs_set_samples(0);
     }
 
-    if(top_prefs_get_samples() > -1)
-	top_prefs_set_logging_mode(true);
+    if (top_prefs_get_samples() > -1)
+        top_prefs_set_logging_mode(true);
     
-    if(!top_prefs_get_logging_mode())
-	init();
+    if (!top_prefs_get_logging_mode())
+        init();
 
     top_signal_init();
   
-    if(libtop_init(NULL, NULL)) {
-	endwin();
-	fprintf(stderr, "libtop_init failed!\n");
-	return EXIT_FAILURE;
+    if (libtop_init(NULL, NULL)) {
+        endwin();
+        fprintf(stderr, "libtop_init failed!\n");
+        return EXIT_FAILURE;
     }
 
-    if(top_prefs_get_frameworks()
+    if (top_prefs_get_frameworks()
        && libtop_set_interval(top_prefs_get_frameworks_interval())) {
-	endwin();
-	fprintf(stderr, "error: setting framework update interval.\n");
-	exit(EXIT_FAILURE);
+        endwin();
+        fprintf(stderr, "error: setting framework update interval.\n");
+        exit(EXIT_FAILURE);
     }
 
     tinst = top_create(stdscr);    
 
-    if(!top_prefs_get_logging_mode()) {
-	top_insert(tinst);
-	top_layout(tinst);
-	top_draw(tinst);
-	event_loop(tinst);
+    if (!top_prefs_get_logging_mode()) {
+        top_insert(tinst);
+        top_layout(tinst);
+        top_draw(tinst);
+        event_loop(tinst);
     } else {
-	top_logging_loop(tinst);
+        top_logging_loop(tinst);
     }
 
     return EXIT_SUCCESS;    

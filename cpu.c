@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2004, 2008 Apple Computer, Inc.  All rights reserved.
+ * Copyright (c) 2002-2004, 2008, 2019 Apple Computer, Inc.  All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -35,7 +35,6 @@ extern mach_timebase_info_data_t timebase_info;
 
 static bool cpu_insert_cell(struct statistic *s, const void *sample) {
 	const libtop_psamp_t *psamp = sample;
-	struct timeval elapsed, used;
 	char buf[10];
 	unsigned long long elapsed_us = 0, used_us = 0;
 	int whole = 0, part = 0;
@@ -50,31 +49,28 @@ static bool cpu_insert_cell(struct statistic *s, const void *sample) {
 		return generic_insert_cell(s, buf);
 	}
 
-
+	uint64_t last_timens = 0;
+	uint64_t last_total_timens = 0;
 	switch(top_prefs_get_mode()) {
 		case STATMODE_ACCUM:
-			timersub(&tsamp->time, &tsamp->b_time, &elapsed);
-			timersub(&psamp->total_time, &psamp->b_total_time, &used);
+			last_timens = tsamp->b_timens;
+			last_total_timens = psamp->b_total_timens;
 			break;
-
 
 		case STATMODE_EVENT:
 		case STATMODE_DELTA:
 		case STATMODE_NON_EVENT:
-			timersub(&tsamp->time, &tsamp->p_time, &elapsed);
-			timersub(&psamp->total_time, &psamp->p_total_time, &used);
+			last_timens = tsamp->p_timens;
+			last_total_timens = psamp->p_total_timens;
 			break;
 
 		default:
-			fprintf(stderr, "unhandled STATMOMDE in %s\n", __func__);
+			fprintf(stderr, "unhandled STATMODE in %s\n", __func__);
 			abort();
 	}
 
-	elapsed_us = (unsigned long long)elapsed.tv_sec * 1000000ULL
-		+ (unsigned long long)elapsed.tv_usec;
-
-	used_us = (unsigned long long)used.tv_sec * 1000000ULL
-		+ (unsigned long long)used.tv_usec;
+	elapsed_us = (tsamp->timens - last_timens) / NSEC_PER_USEC;
+	used_us = (psamp->total_timens - last_total_timens) / NSEC_PER_USEC;
 
 	/* Avoid a divide by 0 exception. */
 	if(elapsed_us > 0) {
@@ -108,13 +104,12 @@ struct statistic *top_cpu_create(WINDOW *parent, const char *name) {
 static bool cpu_me_insert_cell(struct statistic *s, const void *sample) {
 
 	const libtop_psamp_t *psamp = sample;
-	struct timeval elapsed;
 	char buf[10];
 	unsigned long long elapsed_ns = 0, used_ns = 0;
 
 	if(0 == psamp->p_seq) {
 
-		if(-1 == snprintf(buf, sizeof(buf), "%7.5f", 0))
+		if(-1 == snprintf(buf, sizeof(buf), "%7.5f", 0.0))
 			return true;
 
 		return generic_insert_cell(s, buf);
@@ -122,7 +117,7 @@ static bool cpu_me_insert_cell(struct statistic *s, const void *sample) {
 
 	switch(top_prefs_get_mode()) {
 		case STATMODE_ACCUM:
-			timersub(&tsamp->time, &tsamp->b_time, &elapsed);
+			elapsed_ns = tsamp->timens - tsamp->b_timens;
 			used_ns = psamp->cpu_billed_to_me - psamp->b_cpu_billed_to_me;
 			break;
 
@@ -130,19 +125,16 @@ static bool cpu_me_insert_cell(struct statistic *s, const void *sample) {
 		case STATMODE_EVENT:
 		case STATMODE_DELTA:
 		case STATMODE_NON_EVENT:
-			timersub(&tsamp->time, &tsamp->p_time, &elapsed);
+			elapsed_ns = tsamp->timens - tsamp->p_timens;
 			used_ns = psamp->cpu_billed_to_me - psamp->p_cpu_billed_to_me;
 			break;
 
 		default:
-			fprintf(stderr, "unhandled STATMOMDE in %s\n", __func__);
+			fprintf(stderr, "unhandled STATMODE in %s\n", __func__);
 			abort();
 	}
 
 	used_ns = used_ns * timebase_info.numer / timebase_info.denom;
-
-	elapsed_ns = (unsigned long long)elapsed.tv_sec * 1000000000ULL
-		+ (unsigned long long)elapsed.tv_usec* 1000ULL;
 
 	//top_log("command %s whole %d part %d\n", psamp->command, whole, part);
 
@@ -174,13 +166,12 @@ struct statistic *top_cpu_me_create(WINDOW *parent, const char *name) {
 static bool cpu_others_insert_cell(struct statistic *s, const void *sample) {
 
 	const libtop_psamp_t *psamp = sample;
-	struct timeval elapsed;
 	char buf[10];
 	unsigned long long elapsed_ns = 0, used_ns = 0;
 
 	if(0 == psamp->p_seq) {
 
-		if(-1 == snprintf(buf, sizeof(buf), "%7.5f", 0))
+		if(-1 == snprintf(buf, sizeof(buf), "%7.5f", 0.0))
 			return true;
 
 		return generic_insert_cell(s, buf);
@@ -189,27 +180,23 @@ static bool cpu_others_insert_cell(struct statistic *s, const void *sample) {
 
 	switch(top_prefs_get_mode()) {
 		case STATMODE_ACCUM:
-			timersub(&tsamp->time, &tsamp->b_time, &elapsed);
+			elapsed_ns = tsamp->timens - tsamp->b_timens;
 			used_ns = psamp->cpu_billed_to_others - psamp->b_cpu_billed_to_others;
 			break;
-
 
 		case STATMODE_EVENT:
 		case STATMODE_DELTA:
 		case STATMODE_NON_EVENT:
-			timersub(&tsamp->time, &tsamp->p_time, &elapsed);
+			elapsed_ns = tsamp->timens - tsamp->p_timens;
 			used_ns = psamp->cpu_billed_to_others - psamp->p_cpu_billed_to_others;
 			break;
 
 		default:
-			fprintf(stderr, "unhandled STATMOMDE in %s\n", __func__);
+			fprintf(stderr, "unhandled STATMODE in %s\n", __func__);
 			abort();
 	}
 
 	used_ns = used_ns * timebase_info.numer / timebase_info.denom;
-
-	elapsed_ns = (unsigned long long)elapsed.tv_sec * 1000000000ULL
-		+ (unsigned long long)elapsed.tv_usec * 1000ULL;
 
 	//top_log("command %s whole %d part %d\n", psamp->command, whole, part);
 
@@ -285,7 +272,7 @@ static bool instrs_insert_cell(struct statistic *s, const void *sample) {
 	uint64_t value;
 
 	if (psamp->p_seq == 0) {
-		if (snprintf(buf, sizeof(buf), "%" PRIu64, 0) == -1) {
+		if (snprintf(buf, sizeof(buf), "%" PRIu64, (uint64_t) 0) == -1) {
 			return true;
 		}
 
@@ -304,7 +291,7 @@ static bool instrs_insert_cell(struct statistic *s, const void *sample) {
 		break;
 
 	default:
-		fprintf(stderr, "unhandled STATMOMDE in %s\n", __func__);
+		fprintf(stderr, "unhandled STATMODE in %s\n", __func__);
 		abort();
 	}
 

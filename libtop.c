@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2004, 2008, 2009 Apple Inc.  All rights reserved.
+ * Copyright (c) 2002-2004, 2008, 2009, 2019 Apple Inc.  All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -74,6 +74,10 @@
 
 #include "libtop.h"
 #include "rb.h"
+
+#define NS_TO_TIMEVAL(NS) \
+		(struct timeval){ .tv_sec = (NS) / NSEC_PER_SEC, \
+		.tv_usec = ((NS) % NSEC_PER_SEC) / NSEC_PER_USEC, }
 
 /*
  * Process info.
@@ -194,10 +198,9 @@ static libtop_pinfo_t *libtop_piter;
 /* Cache of uid->username translations. */
 static CFMutableDictionaryRef libtop_uhash;
 
-#define	TIME_VALUE_TO_TIMEVAL(a, r) do {				\
-	(r)->tv_sec = (a)->seconds;					\
-	(r)->tv_usec = (a)->microseconds;				\
-} while (0)
+#define TIME_VALUE_TO_NS(a) \
+		(((uint64_t)((a)->seconds) * NSEC_PER_SEC) + \
+		((uint64_t)((a)->microseconds) * NSEC_PER_USEC))
 
 enum libtop_status {
 	LIBTOP_NO_ERR = 0,
@@ -345,10 +348,10 @@ libtop_init(libtop_print_t *print, void *user_data)
 	tsamp.cpu = tsamp.b_cpu;
 
 	/* Initialize the time. */
-	gettimeofday(&tsamp.b_time, NULL);
-	tsamp.p_time = tsamp.b_time;
-	tsamp.time = tsamp.b_time;
 	mach_timebase_info(&timebase_info);
+	tsamp.b_timens = tsamp.p_timens = tsamp.timens =
+			clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+	tsamp.b_time = tsamp.p_time = tsamp.time = NS_TO_TIMEVAL(tsamp.timens);
 
 	ignore_PPP = FALSE;
 	return 0;
@@ -386,8 +389,9 @@ libtop_fini(void)
 int
 libtop_set_interval(uint32_t ival)
 {
-	if (ival < 0 || ival > LIBTOP_MAX_INTERVAL) {
-		return -1;
+    /* Interval has to be above or equal one and less than max */
+	if ((ival == 0) || (ival > LIBTOP_MAX_INTERVAL)) {
+        return -1;
 	}
 	interval = ival;
 	return 0;
@@ -414,11 +418,13 @@ libtop_sample(boolean_t reg, boolean_t fw)
 
 	/* Get time. */
 	if (tsamp.seq != 1) {
-		tsamp.p_time = tsamp.time;
-		res = gettimeofday(&tsamp.time, NULL);
+		tsamp.p_timens = tsamp.timens;
+		tsamp.p_time = NS_TO_TIMEVAL(tsamp.timens);
+		tsamp.timens = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+		tsamp.time = NS_TO_TIMEVAL(tsamp.timens);
 	}
 
-	if (res == 0) res = libtop_p_proc_table_read(reg);
+	res = libtop_p_proc_table_read(reg);
 	if (res == 0) res = libtop_p_loadavg_update();
 	   
 	/* Get CPU usage counters. */
@@ -815,9 +821,9 @@ libtop_p_fw_sample(boolean_t fw)
 #elif defined(__x86_64__) || defined(__i386__)
 	libtop_p_fw_scan(mach_task_self(), SHARED_REGION_BASE_I386, SHARED_REGION_BASE_I386);
 	libtop_p_fw_scan(mach_task_self(), SHARED_REGION_BASE_X86_64, SHARED_REGION_BASE_X86_64);
-#else /* !defined(__arm__) && !defined(__arm64__) && !defined(__x86_64__) && !defined(__i386__) */
+#else
 #error "unsupported architecture"
-#endif /* !defined(__arm__) && !defined(__arm64__) && !defined(__x86_64__) && !defined(__i386__) */
+#endif
 
 	// Iterate through all processes, collecting their individual fw stats
 	libtop_piter = NULL;
@@ -1284,6 +1290,8 @@ libtop_p_proc_table_read(boolean_t reg)
 				case LIBTOP_ERR_ALLOC:
 					fatal_error_occurred = true;
 					break;
+                case LIBTOP_NO_ERR:
+                    break;
 			}
 
 			mach_port_deallocate(mach_task_self(), tasks[j]);
@@ -1549,67 +1557,22 @@ libtop_pinfo_update_power_info(task_t task, libtop_pinfo_t *pinfo)
 	return kr;
 }
 
-#ifndef TASK_VM_INFO_PURGEABLE
-// cribbed from sysmond
-static uint64_t
-sum_vm_purgeable_info(const vm_purgeable_info_t info)
-{
-	uint64_t sum = 0;
-	int i;
-
-	for (i = 0; i < 8; i++) {
-		sum += info->fifo_data[i].size;
-	}
-	sum += info->obsolete_data.size;
-	for (i = 0; i < 8; i++) {
-		sum += info->lifo_data[i].size;
-	}
-
-	return sum;
-}
-#endif /* !TASK_VM_INFO_PURGEABLE */
-
 static kern_return_t
 libtop_pinfo_update_vm_info(task_t task, libtop_pinfo_t *pinfo)
 {
 	kern_return_t kr;
-#ifndef TASK_VM_INFO_PURGEABLE
-	task_purgable_info_t purgeable_info;
-	uint64_t purgeable_sum = 0;
-#endif /* !TASK_VM_INFO_PURGEABLE */
 	mach_msg_type_number_t info_count;
 	task_vm_info_data_t vm_info;
 
 	pinfo->psamp.p_purgeable = pinfo->psamp.purgeable;
-	pinfo->psamp.p_anonymous = pinfo->psamp.anonymous;
+    pinfo->psamp.p_pfootprint = pinfo->psamp.pfootprint;
 	pinfo->psamp.p_compressed = pinfo->psamp.compressed;
 
-#ifndef TASK_VM_INFO_PURGEABLE
-	kr = task_purgable_info(task, &purgeable_info);
-	if (kr == KERN_SUCCESS) {
-		purgeable_sum = sum_vm_purgeable_info(&purgeable_info);
-		pinfo->psamp.purgeable = purgeable_sum;
-	}
-#endif /* !TASK_VM_INFO_PURGEABLE */
-
 	info_count = TASK_VM_INFO_COUNT;
-#ifdef TASK_VM_INFO_PURGEABLE
 	kr = task_info(task, TASK_VM_INFO_PURGEABLE, (task_info_t)&vm_info, &info_count);
-#else
-	kr = task_info(task, TASK_VM_INFO, (task_info_t)&vm_info, &info_count);
-#endif
 	if (kr == KERN_SUCCESS) {
-#ifdef TASK_VM_INFO_PURGEABLE
 		pinfo->psamp.purgeable = vm_info.purgeable_volatile_resident;
-		pinfo->psamp.anonymous = vm_info.internal - vm_info.purgeable_volatile_pmap;
-#else
-		if (purgeable_sum < vm_info.internal) {
-			pinfo->psamp.anonymous = vm_info.internal - purgeable_sum;
-		} else {
-			/* radar:13816348 */
-			pinfo->psamp.anonymous = 0;
-		}
-#endif
+        pinfo->psamp.pfootprint = vm_info.phys_footprint;
 		pinfo->psamp.compressed = vm_info.compressed;
 	}
 
@@ -1652,11 +1615,8 @@ libtop_pinfo_update_cpu_usage(task_t task, libtop_pinfo_t* pinfo, int *state) {
 		if (kr != KERN_SUCCESS) continue;
 		
 		if ((info.flags & (TH_FLAGS_IDLE | TH_FLAGS_GLOBAL_FORCED_IDLE)) == 0) {
-			struct timeval tv;
-			TIME_VALUE_TO_TIMEVAL(&info.user_time, &tv);
-			timeradd(&pinfo->psamp.total_time, &tv, &pinfo->psamp.total_time);
-			TIME_VALUE_TO_TIMEVAL(&info.system_time, &tv);
-			timeradd(&pinfo->psamp.total_time, &tv, &pinfo->psamp.total_time);
+			pinfo->psamp.total_timens += TIME_VALUE_TO_NS(&info.user_time) +
+					TIME_VALUE_TO_NS(&info.system_time);
 		}
 
 		if(info.run_state == TH_STATE_RUNNING) {
@@ -2027,7 +1987,7 @@ libtop_p_task_update(task_t task, boolean_t reg)
 	pinfo->psamp.vsize = ti.virtual_size;
 
 	// Update total time.
-	pinfo->psamp.p_total_time = pinfo->psamp.total_time;
+	pinfo->psamp.p_total_timens = pinfo->psamp.total_timens;
 
 	//Store the previous on-behalf CPU time
 	pinfo->psamp.p_cpu_billed_to_me = pinfo->psamp.cpu_billed_to_me;
@@ -2064,10 +2024,8 @@ libtop_p_task_update(task_t task, boolean_t reg)
 	 */
 	kr = libtop_pinfo_update_boosts(task, pinfo);
 
-	struct timeval tv;
-	TIME_VALUE_TO_TIMEVAL(&ti.user_time, &pinfo->psamp.total_time);
-	TIME_VALUE_TO_TIMEVAL(&ti.system_time, &tv);
-	timeradd(&pinfo->psamp.total_time, &tv, &pinfo->psamp.total_time);
+	pinfo->psamp.total_timens = TIME_VALUE_TO_NS(&ti.user_time) +
+			TIME_VALUE_TO_NS(&ti.system_time);
 
 	/*
 	 * Get CPU usage statistics.
@@ -2076,8 +2034,8 @@ libtop_p_task_update(task_t task, boolean_t reg)
 
 	if (pinfo->psamp.p_seq == 0) {
 		/* Set initial values. */
-		pinfo->psamp.b_total_time = pinfo->psamp.total_time;
-		pinfo->psamp.p_total_time = pinfo->psamp.total_time;
+		pinfo->psamp.b_total_timens = pinfo->psamp.total_timens;
+		pinfo->psamp.p_total_timens = pinfo->psamp.total_timens;
 	}
 	
 	/*
