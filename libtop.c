@@ -217,7 +217,7 @@ static int libtop_p_mach_state_order(int state, long sleep_time);
 static int libtop_p_load_get(host_info_t r_load);
 static int libtop_p_loadavg_update(void);
 static bool in_shared_region(mach_vm_address_t addr, cpu_type_t type);
-static void libtop_p_fw_scan(task_t task, mach_vm_address_t region_base,
+static void libtop_p_fw_scan(task_read_t task, mach_vm_address_t region_base,
 	mach_vm_size_t region_size);
 static void libtop_p_fw_sample(boolean_t fw);
 static int libtop_p_vm_sample(void);
@@ -226,7 +226,7 @@ static int libtop_p_disks_sample(void);
 static int libtop_p_proc_table_read(boolean_t reg);
 static libtop_status_t libtop_p_cputype(pid_t pid, cpu_type_t *cputype);
 static mach_vm_size_t libtop_p_shreg_size(cpu_type_t);
-static libtop_status_t libtop_p_task_update(task_t task, boolean_t reg);
+static libtop_status_t libtop_p_task_update(task_read_t task, boolean_t reg);
 static libtop_status_t libtop_p_proc_command(libtop_pinfo_t *pinfo,
 	struct kinfo_proc *kinfo);
 static void libtop_p_pinsert(libtop_pinfo_t *pinfo);
@@ -705,11 +705,23 @@ in_shared_region(mach_vm_address_t addr, cpu_type_t type) {
 	mach_vm_address_t base = 0, size = 0;
 
 	switch(type) {
+#if !defined(__OPEN_SOURCE__) && defined(CPU_TYPE_ARM64_32)
+		case CPU_TYPE_ARM64_32:
+            base = SHARED_REGION_BASE_ARM64_32;
+            size = SHARED_REGION_SIZE_ARM64_32;
+            break;
+#endif
 		case CPU_TYPE_ARM:
 			base = SHARED_REGION_BASE_ARM;
 			size = SHARED_REGION_SIZE_ARM;
 		break;
 
+#if !defined(__OPEN_SOURCE__) && defined(CPU_TYPE_ARM64)
+		case CPU_TYPE_ARM64:
+			base = SHARED_REGION_BASE_ARM64;
+			size = SHARED_REGION_SIZE_ARM64;
+		break;
+#endif
 
 		case CPU_TYPE_X86_64:
 			base = SHARED_REGION_BASE_X86_64;
@@ -747,7 +759,7 @@ in_shared_region(mach_vm_address_t addr, cpu_type_t type) {
 /* Iterate through a given region of memory, adding up the various
    submap regions found therein.  Modifies tsamp. */
 static void
-libtop_p_fw_scan(task_t task, mach_vm_address_t region_base, mach_vm_size_t region_size) {
+libtop_p_fw_scan(task_read_t task, mach_vm_address_t region_base, mach_vm_size_t region_size) {
 	mach_vm_size_t	vsize = 0;
 	mach_vm_size_t	code = 0;
 	mach_vm_size_t	data = 0;
@@ -816,6 +828,8 @@ libtop_p_fw_sample(boolean_t fw)
 
 #if defined(__arm__)
 	libtop_p_fw_scan(mach_task_self(), SHARED_REGION_BASE_ARM, SHARED_REGION_SIZE_ARM);
+#elif !defined(__OPEN_SOURCE__) && defined(__arm64__) && !defined(__LP64__)
+    libtop_p_fw_scan(mach_task_self(), SHARED_REGION_BASE_ARM64_32, SHARED_REGION_SIZE_ARM64_32);
 #elif defined(__arm64__)
 	libtop_p_fw_scan(mach_task_self(), SHARED_REGION_BASE_ARM64, SHARED_REGION_SIZE_ARM64);
 #elif defined(__x86_64__) || defined(__i386__)
@@ -1265,7 +1279,7 @@ libtop_p_proc_table_read(boolean_t reg)
 			return -1;
 		}
 
-		kr = processor_set_tasks(pset, &tasks, &tcnt);
+		kr = processor_set_tasks_with_flavor(pset, TASK_FLAVOR_READ, &tasks, &tcnt);
 		if (kr != KERN_SUCCESS) {
 			libtop_print(libtop_user_data, "Error in processor_set_tasks(): %s",
 			    mach_error_string(kr));
@@ -1344,6 +1358,12 @@ libtop_p_shreg_size(cpu_type_t type) {
 	switch(type)
 	{
 		case CPU_TYPE_ARM:			return SHARED_REGION_SIZE_ARM;
+#if !defined(__OPEN_SOURCE__) && defined(CPU_TYPE_ARM64)
+        case CPU_TYPE_ARM64:        return SHARED_REGION_SIZE_ARM64;
+#endif
+#if !defined(__OPEN_SOURCE__) && defined(CPU_TYPE_ARM64_32)
+        case CPU_TYPE_ARM64_32:     return SHARED_REGION_SIZE_ARM64_32;
+#endif
 		case CPU_TYPE_POWERPC:		return SHARED_REGION_SIZE_PPC;
 		case CPU_TYPE_POWERPC64:	return SHARED_REGION_SIZE_PPC64;
 		case CPU_TYPE_I386:			return SHARED_REGION_SIZE_I386;
@@ -1372,7 +1392,7 @@ kinfo_for_pid(struct kinfo_proc* kinfo, pid_t pid) {
 }
 
 static kern_return_t
-libtop_pinfo_update_boosts(task_t task, libtop_pinfo_t* pinfo) {
+libtop_pinfo_update_boosts(task_read_t task, libtop_pinfo_t* pinfo) {
 
 #if !defined(TASK_POLICY_STATE_COUNT)
 	struct task_policy_state {
@@ -1440,7 +1460,7 @@ libtop_pinfo_update_boosts(task_t task, libtop_pinfo_t* pinfo) {
 
 
 static kern_return_t
-libtop_pinfo_update_mach_ports(task_t task, libtop_pinfo_t* pinfo) {
+libtop_pinfo_update_mach_ports(task_read_t task, libtop_pinfo_t* pinfo) {
 	kern_return_t kr;
 	ipc_info_space_basic_t info;
 
@@ -1455,7 +1475,7 @@ libtop_pinfo_update_mach_ports(task_t task, libtop_pinfo_t* pinfo) {
 }
 
 static kern_return_t
-libtop_pinfo_update_events_info(task_t task, libtop_pinfo_t* pinfo) {
+libtop_pinfo_update_events_info(task_read_t task, libtop_pinfo_t* pinfo) {
 	kern_return_t kr;
 	mach_msg_type_number_t count = TASK_EVENTS_INFO_COUNT;
 
@@ -1524,7 +1544,7 @@ libtop_pinfo_update_events_info(task_t task, libtop_pinfo_t* pinfo) {
 }
 
 static kern_return_t
-libtop_pinfo_update_kernmem_info(task_t task, libtop_pinfo_t* pinfo) {
+libtop_pinfo_update_kernmem_info(task_read_t task, libtop_pinfo_t* pinfo) {
 	kern_return_t kr;
 	
 	mach_msg_type_number_t count = TASK_KERNELMEMORY_INFO_COUNT;
@@ -1539,7 +1559,7 @@ libtop_pinfo_update_kernmem_info(task_t task, libtop_pinfo_t* pinfo) {
 }
 
 static kern_return_t
-libtop_pinfo_update_power_info(task_t task, libtop_pinfo_t *pinfo)
+libtop_pinfo_update_power_info(task_read_t task, libtop_pinfo_t *pinfo)
 {
 	kern_return_t kr;
 	mach_msg_type_number_t count = TASK_POWER_INFO_COUNT;
@@ -1558,7 +1578,7 @@ libtop_pinfo_update_power_info(task_t task, libtop_pinfo_t *pinfo)
 }
 
 static kern_return_t
-libtop_pinfo_update_vm_info(task_t task, libtop_pinfo_t *pinfo)
+libtop_pinfo_update_vm_info(task_read_t task, libtop_pinfo_t *pinfo)
 {
 	kern_return_t kr;
 	mach_msg_type_number_t info_count;
@@ -1580,7 +1600,7 @@ libtop_pinfo_update_vm_info(task_t task, libtop_pinfo_t *pinfo)
 }
 
 static kern_return_t
-libtop_pinfo_update_cpu_usage(task_t task, libtop_pinfo_t* pinfo, int *state) {
+libtop_pinfo_update_cpu_usage(task_read_t task, libtop_pinfo_t* pinfo, int *state) {
 	kern_return_t kr;
 	thread_act_array_t threads;
 	mach_msg_type_number_t tcnt;
@@ -1589,7 +1609,8 @@ libtop_pinfo_update_cpu_usage(task_t task, libtop_pinfo_t* pinfo, int *state) {
 	
 	*state = LIBTOP_STATE_MAX;
 	pinfo->psamp.state = LIBTOP_STATE_MAX;
-
+    
+    /* Returns thread read ports */
 	kr = task_threads(task, &threads, &tcnt);
 	if (kr != KERN_SUCCESS) return kr;
 
@@ -1650,7 +1671,7 @@ share_mode_to_string(int share_mode) {
 #endif
 
 static kern_return_t
-libtop_update_vm_regions(task_t task, libtop_pinfo_t* pinfo) {
+libtop_update_vm_regions(task_read_t task, libtop_pinfo_t* pinfo) {
 	kern_return_t kr;
 	
 	mach_vm_size_t rprvt = 0;
@@ -1836,7 +1857,7 @@ libtop_update_vm_regions(task_t task, libtop_pinfo_t* pinfo) {
  * The caller should not make assumptions about the lifetime of the pinfo.
  */
 static libtop_status_t __attribute__((noinline))
-libtop_p_task_update(task_t task, boolean_t reg)
+libtop_p_task_update(task_read_t task, boolean_t reg)
 {
 	kern_return_t kr;
 	int res;
