@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2004, 2019 Apple Computer, Inc.  All rights reserved.
+ * Copyright (c) 2002-2024, 2019 Apple Computer, Inc.  All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -27,6 +27,7 @@
 #include <stdarg.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
+#include <os/base.h>
 
 __BEGIN_DECLS
 
@@ -58,6 +59,10 @@ typedef struct libtop_i64_values {
 	uint64_t previous;
 } libtop_i64_values_t;
 
+typedef struct hvwait_data {
+	uint64_t invol_wait;
+} hvwait_data_t;
+
 /*
  * Type used for specifying a printing function that is called when an error
  * occurs.  libtop does not print a '\n' at the end of the string, so it is
@@ -87,6 +92,12 @@ typedef struct {
 	host_cpu_load_info_data_t cpu;
 	host_cpu_load_info_data_t b_cpu;
 	host_cpu_load_info_data_t p_cpu;
+
+	/* hypervisor host wait times */
+	boolean_t hvw_is_active;
+	hvwait_data_t hvw;
+	hvwait_data_t b_hvw;
+	hvwait_data_t p_hvw;
 
 	/* Load averages for 1, 5, and 15 minutes. */
 	float loadavg[3];
@@ -355,6 +366,25 @@ struct libtop_psamp_s {
  */
 int libtop_init(libtop_print_t *a_print, void *a_user_data);
 
+/*
+ * Options for libtop_initx.
+ */
+OS_OPTIONS(libtop_init_options, uint32_t,
+	LIBTOP_INIT_BASE = 0x00,
+	/*
+	 * Use task inspect ports to gather data.
+	 *
+	 * Information about the memory usage of frameworks will not be available.
+	 */
+	LIBTOP_INIT_INSPECT = 0x01,
+);
+
+/*
+ * Initialize libtop, like libtop_init, but with options.
+ */
+int libtop_init_with_options(libtop_print_t *a_print, void *a_user_data,
+	libtop_init_options_t options);
+
 /* Shut down libtop. */
 void libtop_fini(void);
 
@@ -414,6 +444,11 @@ const libtop_psamp_t *libtop_piterate(void);
  * Returns zero for success, non-zero for error.
  */
 int libtop_preg(pid_t a_pid, libtop_preg_t a_preg);
+
+/*
+ * {En,Dis}able collection of hv wait samples
+ */
+void libtop_init_hvwait(boolean_t active);
 
 /*
  * Set the interval between framework updates.
